@@ -1,0 +1,12 @@
+openai>=2
+httpx
+duckdb
+pydantic>=2
+python-dotenv
+pypdf
+numpy
+fastapi
+uvicorn
+streamlit
+mcp>=2,<3
+pytest
