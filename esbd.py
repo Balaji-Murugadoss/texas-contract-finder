@@ -4,6 +4,7 @@ Same job as an SFTP drop from a client: validate each file, then bulk-load raw -
 import csv
 import json
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -73,20 +74,33 @@ def _modified(row):
         return datetime.min
 
 
+CODE_PART = re.compile(r"^(\d{5})(?:-(.*))?$", re.S)     # 5 digits, then optionally "-label"
+
+
 def nigp_codes(text) -> dict:
-    """'90930-Building Construction (NOC);91039-HVAC;' -> {'90930': 'Building Construction (NOC)', '91039': 'HVAC'}"""
-    codes = {}
-    for part in (text or "").split(";"):
-        code, _, label = part.strip().partition("-")
-        if code.strip():
-            codes[code.strip()] = label.strip()
+    """The NIGP field is messy. All four cases below came from the real export:
+      '03167-Hvac Supplies;'      code-label pairs that end with ';'
+      '...<line break>91450'      extra codes on new lines, with no label
+      '(see 805-xx; and 805-51)'  a ';' inside a label
+      'Training, E(more...)'      the portal cut the text off; the codes after it are lost
+    Returns {'03167': 'Hvac Supplies', '91450': '', ...}"""
+    codes, last = {}, None
+    for part in re.split(r";|[\r\n]+", (text or "").replace("(more...)", "")):
+        part = part.strip()
+        m = CODE_PART.match(part)
+        if m:
+            last = m.group(1)
+            codes[last] = codes.get(last) or (m.group(2) or "").strip()
+        elif part and last:
+            codes[last] += "; " + part        # a ';' inside the label split it: glue it back
     return codes
 
 
 def load_drop(con, folder=DROP_DIR) -> dict:
-    """Read every CSV in the drop folder, keep the newest version of each solicitation, bulk-load it."""
+    """Read every CSV in the drop folder, keep the newest version of each solicitation,
+    and replace the Texas data with it. The drop folder is the source of truth."""
     stats = {"files": 0, "bad_files": [], "rows_read": 0, "duplicates": 0, "skipped_no_id": 0,
-             "no_deadline": 0, "loaded": 0}
+             "no_deadline": 0, "codes_cut_off": 0, "loaded": 0}
     newest = {}
     for path in sorted(Path(folder).glob("*.csv")):
         stats["files"] += 1
@@ -117,6 +131,7 @@ def load_drop(con, folder=DROP_DIR) -> dict:
     for sid, row in newest.items():
         deadline = parse_deadline(row["Due Date"], row["Due Time"])
         stats["no_deadline"] += deadline is None
+        stats["codes_cut_off"] += "(more...)" in row["NIGP Codes"]
         cols["sid"].append(sid)
         cols["payload"].append(json.dumps(row))
         cols["title"].append(row["Name"].strip())
@@ -130,18 +145,31 @@ def load_drop(con, folder=DROP_DIR) -> dict:
             code_cols["code"].append(code)
             code_cols["label"].append(label)
 
+    if stats["codes_cut_off"]:
+        log.warning("%d postings have NIGP codes cut off by the export ('(more...)'): some codes are missing",
+                    stats["codes_cut_off"])
+
     now = datetime.now()
     con.execute("CREATE OR REPLACE TEMP TABLE esbd_stage AS SELECT unnest($sid) AS sid, "
                 "unnest($payload) AS payload, unnest($title) AS title, unnest($agency) AS agency, "
                 "unnest($status) AS status, unnest($posted)::DATE AS posted, "
                 "unnest($deadline)::TIMESTAMP AS deadline, unnest($url) AS url", cols)
-    con.execute("INSERT OR REPLACE INTO raw_esbd SELECT sid, payload, $now FROM esbd_stage", {"now": now})
-    con.execute("INSERT OR REPLACE INTO opportunities SELECT 'esbd:' || sid, 'esbd', title, agency, NULL, "
-                "status, NULL, 'TX', posted, deadline, url, '[]', $now FROM esbd_stage", {"now": now})
-    con.execute("DELETE FROM opportunity_codes WHERE scheme = 'nigp' "
-                "AND opp_id IN (SELECT 'esbd:' || sid FROM esbd_stage)")
-    if code_cols["code"]:
-        con.execute("INSERT INTO opportunity_codes SELECT unnest($opp_id), 'nigp', unnest($code), unnest($label)",
-                    code_cols)
+    # Each export is a full snapshot of the open postings, so replace the whole Texas slice.
+    # One transaction: if anything fails, nothing changes (no half-empty tables).
+    con.execute("BEGIN TRANSACTION")
+    try:
+        con.execute("DELETE FROM opportunity_codes WHERE scheme = 'nigp'")
+        con.execute("DELETE FROM opportunities WHERE source = 'esbd'")
+        con.execute("DELETE FROM raw_esbd")
+        con.execute("INSERT INTO raw_esbd SELECT sid, payload, $now FROM esbd_stage", {"now": now})
+        con.execute("INSERT INTO opportunities SELECT 'esbd:' || sid, 'esbd', title, agency, NULL, "
+                    "status, NULL, 'TX', posted, deadline, url, '[]', $now FROM esbd_stage", {"now": now})
+        if code_cols["code"]:
+            con.execute("INSERT INTO opportunity_codes "
+                        "SELECT unnest($opp_id), 'nigp', unnest($code), unnest($label)", code_cols)
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
     stats["loaded"] = len(newest)
     return stats

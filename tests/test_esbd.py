@@ -28,3 +28,22 @@ def test_esbd_rejects_changed_format(tmp_path):
     (tmp_path / "renamed.csv").write_text("Title,ID\nx,1\n")
     s = esbd.load_drop(db.connect(path=":memory:"), tmp_path)
     assert s["bad_files"] == ["renamed.csv"] and s["loaded"] == 0
+
+
+def test_nigp_codes_handles_real_export_quirks():
+    text = ("03167-Hvac Supplies\r\n91450;20847-*Games (see 785-xx; and 805-51 for others);"
+            "20866-*Computer Training, E(more...)")
+    assert esbd.nigp_codes(text) == {"03167": "Hvac Supplies", "91450": "",
+                                     "20847": "*Games (see 785-xx; and 805-51 for others)",
+                                     "20866": "*Computer Training, E"}
+
+
+def test_removing_a_file_removes_its_rows(tmp_path):
+    row = "T,{},12/1/2026,2:00 PM,808,Posted,11/10/2026,x,11/10/2026 3:51 pm,90930-Building;\n"
+    (tmp_path / "all.csv").write_text(HEADER + row.format("A") + row.format("B"))
+    (tmp_path / "open.csv").write_text(HEADER + row.format("A"))
+    con = db.connect(path=":memory:")
+    esbd.load_drop(con, tmp_path)
+    (tmp_path / "all.csv").unlink()                                # take the big file out of the drop folder
+    esbd.load_drop(con, tmp_path)
+    assert con.execute("SELECT opp_id FROM opportunities").fetchall() == [("esbd:A",)]

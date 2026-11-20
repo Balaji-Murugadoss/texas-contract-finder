@@ -1,0 +1,6 @@
+{
+  "_note": "NAICS -> NIGP item codes for matching Texas ESBD postings. Built 2026-11-20 from the real export: keyword search over the code labels, then each code reviewed by hand. A proposal: a procurement expert should confirm it.",
+  "238220": ["91036", "91450", "99247", "94155", "91017", "91136"],
+  "541511": ["92000", "92040", "92007", "92027", "91829", "92076"],
+  "541512": ["92000", "92045", "92046", "91829", "91830", "92031", "92076"]
+}
