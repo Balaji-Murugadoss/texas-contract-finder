@@ -20,6 +20,9 @@ SCHEMA = [
         opp_id TEXT PRIMARY KEY, source TEXT, title TEXT, agency TEXT, naics TEXT,
         notice_type TEXT, set_aside TEXT, state TEXT, posted_date DATE,
         response_deadline TIMESTAMP, url TEXT, attachments_json TEXT, loaded_at TIMESTAMP)""",
+    # one row per (opportunity, code): a notice can have many codes, from different systems (NAICS, NIGP)
+    """CREATE TABLE IF NOT EXISTS opportunity_codes (
+        opp_id TEXT, scheme TEXT, code TEXT, label TEXT, PRIMARY KEY (opp_id, scheme, code))""",
     """CREATE TABLE IF NOT EXISTS awards (
         award_id TEXT PRIMARY KEY, recipient TEXT, amount DOUBLE, start_date DATE,
         agency TEXT, naics TEXT, state TEXT, description TEXT, loaded_at TIMESTAMP)""",

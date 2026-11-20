@@ -2,7 +2,8 @@
 Run it by hand now, with cron later. It is the ONLY process that writes to DuckDB,
 so stop the API / MCP server while it runs.
 
-Example:  python sync.py --naics 238220 --state TX --esbd-keyword hvac
+Example:  python sync.py --naics 238220 --state TX
+ESBD only:  python sync.py --naics 238220 --skip sam usaspending
 """
 import argparse
 import logging
@@ -20,10 +21,9 @@ def main():
     p.add_argument("--state", default="TX")
     p.add_argument("--days-back", type=int, default=30)
     p.add_argument("--skip", nargs="*", default=[], choices=["sam", "usaspending", "esbd"])
-    p.add_argument("--esbd-keyword")
     a = p.parse_args()
     logging.basicConfig(level=logging.INFO, stream=sys.stderr)
-    logging.getLogger("httpx").setLevel(logging.WARNING)  
+    logging.getLogger("httpx").setLevel(logging.WARNING)   # httpx logs full URLs, which include the SAM key
 
     con = db.connect()
     if "sam" not in a.skip:
@@ -38,10 +38,15 @@ def main():
     if "usaspending" not in a.skip:
         rows = usaspending.fetch_awards(a.naics, a.state)
         print(f"USAspending: {usaspending.load(con, rows, a.naics, a.state)} awards loaded")
-    if "esbd" not in a.skip and a.esbd_keyword:
-        print(f"Texas ESBD: {esbd.load(con, esbd.fetch(a.esbd_keyword))} solicitations loaded")
+    if "esbd" not in a.skip:
+        s = esbd.load_drop(con)
+        print(f"Texas ESBD: {s['loaded']} solicitations from {s['files']} file(s). Read {s['rows_read']}, "
+              f"duplicates {s['duplicates']}, no ID {s['skipped_no_id']}, no deadline {s['no_deadline']}, "
+              f"bad files {s['bad_files']}")
+        if s["rows_read"] != s["loaded"] + s["duplicates"] + s["skipped_no_id"]:
+            print("  WARNING: rows don't balance. Investigate before trusting this load.")
 
-    for table in ["raw_sam", "raw_esbd", "opportunities", "awards", "api_cache"]:
+    for table in ["raw_sam", "raw_esbd", "opportunities", "opportunity_codes", "awards", "api_cache"]:
         print(f"  {table}: {con.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0]} rows")
     con.close()
 
