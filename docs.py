@@ -1,8 +1,11 @@
-"""Bid documents: download PDFs, split into chunks with page numbers, embed, search by meaning.
-This is a tiny vector store you write yourself (numpy + one JSON file per opportunity)."""
+"""Bid documents: download PDFs, split into chunks with page numbers, embed, then search them
+by meaning AND by exact words (hybrid search). A tiny vector store you write yourself:
+numpy + one JSON file per opportunity."""
 import io
 import json
+import math
 import re
+from urllib.parse import unquote_plus
 
 import numpy as np
 from openai import OpenAI
@@ -23,6 +26,12 @@ def client() -> OpenAI:
 
 def _store_path(opp_id: str):
     return config.DOCS_DIR / (re.sub(r"[^A-Za-z0-9_-]", "_", opp_id) + ".json")
+
+
+def _file_name(resp, n: int) -> str:
+    """The server's file name (from the Content-Disposition header), for citations like 'SF1442.pdf p.3'."""
+    match = re.search(r'filename="?([^";]+)', resp.headers.get("content-disposition", ""))
+    return match.group(1) if match else f"file {n}"
 
 
 def pdf_pages(pdf_bytes: bytes) -> list[tuple[int, str]]:
@@ -61,27 +70,54 @@ def rank(matrix: np.ndarray, query: np.ndarray, k: int) -> list[tuple[int, float
     return [(int(i), float(scores[i])) for i in top]
 
 
-def index_document(opp_id: str, attachments: list[str], max_files: int = 3) -> dict:
+STOP = {"a", "an", "and", "are", "at", "be", "by", "do", "does", "for", "from", "how", "in", "is", "it",
+        "must", "of", "on", "or", "shall", "that", "the", "this", "to", "what", "when", "which", "will", "with"}
+
+
+def _words(text: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9$]+", text.lower())) - STOP
+
+
+def keyword_rank(texts: list[str], question: str) -> list[int]:
+    """Exact-word search. A word that appears in few chunks (like 'magnitude') counts more than a common one."""
+    q, chunk_words = _words(question), [_words(t) for t in texts]
+    idf = {w: math.log(len(texts) / (1 + sum(w in cw for cw in chunk_words))) + 1 for w in q}
+    scores = [sum(idf[w] for w in q if w in cw) for cw in chunk_words]
+    return sorted(range(len(texts)), key=lambda i: scores[i], reverse=True)
+
+
+def fuse(*orders: list[int], k: int) -> list[int]:
+    """Reciprocal rank fusion: merge rankings by position, so meaning and exact words both get a vote."""
+    fused: dict[int, float] = {}
+    for order in orders:
+        for position, i in enumerate(order):
+            fused[i] = fused.get(i, 0) + 1 / (60 + position)
+    return sorted(fused, key=fused.get, reverse=True)[:k]
+
+
+def index_document(opp_id: str, attachments: list[str], max_files: int = 8) -> dict:
     """Download, read, chunk and embed a notice's PDFs once. After that, it's read from disk for free."""
     path = _store_path(opp_id)
     if path.exists():
         return json.loads(path.read_text())               # already indexed: no download, no cost
     chunks, skipped, failed = [], [], []
-    for url in attachments[:max_files]:
+    for n, url in enumerate(attachments[:max_files], start=1):
         params = {"api_key": config.SAM_API_KEY} if "sam.gov" in url else None
         try:
-            content = request_with_retry("GET", url, params=params, timeout=60).content
+            resp = request_with_retry("GET", url, params=params, timeout=60)
         except HTTPError as exc:
             failed.append(str(exc))                       # one bad file shouldn't stop the others
             continue
-        if not content.startswith(b"%PDF"):
-            skipped.append(url)                           # v1 reads PDFs only: say so, don't pretend
+        name = _file_name(resp, n)
+        if not resp.content.startswith(b"%PDF"):
+            skipped.append(name)                          # v1 reads PDFs only: say so, don't pretend
             continue
-        for c in chunk_pages(pdf_pages(content)):
-            c["source_url"] = url
+        for c in chunk_pages(pdf_pages(resp.content)):
+            c["file"] = name
             chunks.append(c)
     vectors = embed([c["text"] for c in chunks]).tolist() if chunks else []
-    store = {"opp_id": opp_id, "chunks": chunks, "vectors": vectors, "skipped": skipped, "failed": failed}
+    store = {"opp_id": opp_id, "chunks": chunks, "vectors": vectors, "skipped": skipped, "failed": failed,
+             "files_total": len(attachments), "files_read": min(len(attachments), max_files)}
     if not failed:                                        # don't cache a partial result: retry next time
         config.DOCS_DIR.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(store))
@@ -89,10 +125,14 @@ def index_document(opp_id: str, attachments: list[str], max_files: int = 3) -> d
 
 
 def search(store: dict, question: str, k: int | None = None) -> list[dict]:
+    """Hybrid search: rank by meaning (embeddings) and by exact words, then merge the two rankings."""
     k = k or config.TOP_K_CHUNKS
-    if not store["chunks"]:
+    chunks = store["chunks"]
+    if not chunks:
         return []
-    matrix = np.array(store["vectors"], dtype=np.float32)
-    hits = rank(matrix, embed([question])[0], k)
-    return [{"page": store["chunks"][i]["page"], "score": round(s, 3), "text": store["chunks"][i]["text"]}
-            for i, s in hits]
+    by_meaning = rank(np.array(store["vectors"], dtype=np.float32), embed([question])[0], k=len(chunks))
+    similarity = dict(by_meaning)
+    top = fuse([i for i, _ in by_meaning], keyword_rank([c["text"] for c in chunks], question), k=k)
+    return [{"file": unquote_plus(chunks[i].get("file") or ""),      # '1+-+Solicitation.pdf' -> '1 - Solicitation.pdf'
+             "page": chunks[i]["page"], "similarity": round(similarity[i], 3), "text": chunks[i]["text"]}
+            for i in top]
