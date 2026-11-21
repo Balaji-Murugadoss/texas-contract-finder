@@ -183,8 +183,8 @@ TOOL_SCHEMAS = [
     _fn("past_awards", "Summarize past federal contract awards in Texas for an industry code: "
         "how many, typical size, and who usually wins.",
         {"naics": {"type": "string", "description": "6-digit NAICS; defaults to the business's first code"}}),
-    _fn("read_document", "Search the attached bid documents (PDFs) of one federal opportunity and return "
-        "the most relevant excerpts with file names and page numbers.",
+        _fn("read_document", "Answer any question about what a federal opportunity's documents say: how and when "
+        "to submit, scope, requirements, bonds, insurance. Returns excerpts with file names and page numbers.",
         {"opp_id": {"type": "string"}, "question": {"type": "string"}}, ["opp_id", "question"]),
     _fn("check_fit", "Assess how well this business fits one opportunity: score, verdict, reasons, "
         "missing requirements, deadline, citations.",
