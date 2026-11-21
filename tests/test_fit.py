@@ -11,3 +11,9 @@ def test_timestamps_always_carry_a_time_zone():
 
 def test_public_profile_never_includes_the_api_key():
     assert "api_key" not in fit.public_profile({"tenant_id": "a", "api_key": "secret"})
+
+
+def test_blockers_cap_the_score_and_verdict_follows_the_score():
+    out = fit.apply_policy({"fit_score": 55, "verdict": "possible", "blockers": ["Texas-only, job is in PA"]})
+    assert (out["fit_score"], out["verdict"]) == (49, "weak")
+    assert fit.apply_policy({"fit_score": 80, "verdict": "possible", "blockers": []})["verdict"] == "strong"

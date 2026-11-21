@@ -18,6 +18,7 @@ class FitResult(BaseModel):
     verdict: Literal["strong", "possible", "weak", "not_eligible"]
     reasons: list[str]
     missing_requirements: list[str]
+    blockers: list[str] = []
     deadline: str | None = None
     citations: list[str] = []
 
@@ -30,13 +31,16 @@ If there are no document excerpts, judge from the notice fields only and say the
 Use "today" to judge whether there is realistically enough time to prepare a bid.
 Documents can contradict each other (for example a form says mail, a cover letter says email):
 point out the conflict instead of picking one.
+List blockers: serious obstacles that make bidding unrealistic as things stand (outside the service area,
+project larger than bonding capacity or past experience, a required certification the business lacks,
+too little time). Leave blockers empty if there are none.
 Scoring rubric (the verdict must match the score band):
 75-100 strong: clear fit, no blockers. 50-74 possible: fits, but real gaps to check.
 25-49 weak: serious obstacles, such as outside the service area or above bonding capacity.
 0-24 not_eligible: a hard requirement the business cannot meet.
 Return JSON with exactly these keys:
 fit_score (integer 0-100), verdict ("strong" | "possible" | "weak" | "not_eligible"),
-reasons (list of short strings), missing_requirements (list of strings),
+reasons (list of short strings), missing_requirements (list of strings), blockers (list of strings),
 deadline (string or null), citations (list of strings like "Solicitation.pdf p.4")."""
 
 
@@ -50,6 +54,21 @@ def with_time_zones(notice: dict) -> dict:
     return {k: (f"{v:%Y-%m-%d %H:%M} US Central" if isinstance(v, datetime) else v) for k, v in notice.items()}
 
 
+def band(score: int) -> str:
+    return "strong" if score >= 75 else "possible" if score >= 50 else "weak" if score >= 25 else "not_eligible"
+
+
+def apply_policy(result: dict) -> dict:
+    """The model finds the facts; code applies the rules, the same way every time.
+    Any blocker caps the score at 49 (weak), and the verdict always matches the score band."""
+    if result["blockers"] and result["fit_score"] > 49:
+        result["fit_score"] = 49
+        result["policy"] = "Score capped at 49 because of blockers"
+    if result["verdict"] != "not_eligible":           # the model may still say not_eligible outright
+        result["verdict"] = band(result["fit_score"])
+    return result
+
+
 def check(tenant: dict, notice: dict, excerpts: list[dict], model: str | None = None) -> dict:
     client = OpenAI(api_key=config.OPENAI_API_KEY)
     payload = {"today": f"{datetime.now(CENTRAL):%Y-%m-%d %H:%M} US Central",   # the model has no clock
@@ -61,7 +80,7 @@ def check(tenant: dict, notice: dict, excerpts: list[dict], model: str | None = 
                                               response_format={"type": "json_object"})
         text = resp.choices[0].message.content or ""
         try:
-            return FitResult.model_validate_json(text).model_dump()
+            return apply_policy(FitResult.model_validate_json(text).model_dump())
         except ValidationError as exc:
             messages += [{"role": "assistant", "content": text},
                          {"role": "user", "content": f"Invalid JSON for the schema: {exc.errors()[:3]}. "
