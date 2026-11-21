@@ -11,6 +11,7 @@ import docs
 import fit
 
 OPEN_TEXAS_STATUSES = ["Posted", "Addendum Posted"]
+MIN_DAYS_FLOOR = 3          # business rule, enforced in code: the model can make it stricter, never looser
 NIGP_MAP = json.loads((config.BASE_DIR / "reference" / "naics_to_nigp.json").read_text())
 
 # One search per topic beats one search for everything. Wording measured where we could:
@@ -51,13 +52,14 @@ def _nigp(naics_codes: list[str]) -> list[str]:
 
 
 def search_opportunities(tenant_id: str, keywords: str | None = None, days_ahead: int = 30,
-                         min_days_left: int = 3, place_of_performance: str | None = None,
+                         min_days_left: int = MIN_DAYS_FLOOR, place_of_performance: str | None = None,
                          source: str | None = None, limit: int = 10) -> dict:
     t = _tenant(tenant_id)
     naics = _naics(t)
     now = datetime.now()
+    min_days_left = max(int(min_days_left), MIN_DAYS_FLOOR)
     sql = """SELECT opp_id, source, title, agency, notice_type, set_aside,
-                    state AS place_of_performance,
+                    state AS place_of_performance, url,
                     strftime(response_deadline, '%Y-%m-%d %H:%M') || ' US Central' AS deadline
              FROM opportunities
              WHERE response_deadline BETWEEN ? AND ?
@@ -65,8 +67,7 @@ def search_opportunities(tenant_id: str, keywords: str | None = None, days_ahead
                  OR (source = 'esbd' AND notice_type IN (SELECT unnest(?::VARCHAR[]))
                      AND opp_id IN (SELECT opp_id FROM opportunity_codes
                                     WHERE scheme = 'nigp' AND list_contains(?::VARCHAR[], code))))"""
-    # min_days_left: a business needs time to prepare a bid. Ask each client what "too late" means.
-    params: list = [now + timedelta(days=int(min_days_left)), now + timedelta(days=int(days_ahead)),
+    params: list = [now + timedelta(days=min_days_left), now + timedelta(days=int(days_ahead)),
                     naics, OPEN_TEXAS_STATUSES, _nigp(naics)]
     if place_of_performance:                       # unknown locations are kept, and shown as null
         sql += " AND (state = ? OR state IS NULL)"
@@ -74,14 +75,22 @@ def search_opportunities(tenant_id: str, keywords: str | None = None, days_ahead
     if source:
         sql += " AND source = ?"
         params.append(source)
-    if keywords:
-        sql += " AND title ILIKE ?"
-        params.append(f"%{keywords}%")
-    sql += " ORDER BY response_deadline LIMIT ?"
-    params.append(min(int(limit), 25))             # context engineering: cap what the model sees
-    freshness = _query("SELECT source, strftime(max(loaded_at), '%Y-%m-%d %H:%M') AS last_loaded "
-                       "FROM opportunities GROUP BY source", [])
-    return {"results": _query(sql, params), "data_freshness": freshness}
+    base_sql, base_params = sql, list(params)
+    words = [w for w in keywords.replace(",", " ").split() if len(w) >= 3] if keywords else []
+    if words:                                      # ANY word may match; 'it' would match 'maintenance'
+        sql += " AND (" + " OR ".join(["title ILIKE ?"] * len(words)) + ")"
+        params += [f"%{w}%" for w in words]
+    order = " ORDER BY response_deadline LIMIT ?"
+    cap = min(int(limit), 25)                      # context engineering: cap what the model sees
+    results = _query(sql + order, params + [cap])
+    out = {"results": results}
+    if words and not results:                      # a tool can coach the model instead of returning nothing
+        n = _query(f"SELECT COUNT(*) AS n FROM ({base_sql})", base_params)[0]["n"]
+        out["hint"] = (f"No titles contain {words}, but {n} opportunities match this business's codes. "
+                       "Search again without keywords.")
+    out["data_freshness"] = _query("SELECT source, strftime(max(loaded_at), '%Y-%m-%d %H:%M') AS last_loaded "
+                                   "FROM opportunities GROUP BY source", [])
+    return out
 
 
 def past_awards(tenant_id: str, naics: str | None = None, top_n: int = 5) -> dict:
@@ -164,9 +173,10 @@ def _fn(name, description, properties, required=()):
 TOOL_SCHEMAS = [
     _fn("search_opportunities", "Find open federal (SAM.gov) and Texas (ESBD) opportunities matching "
         "this business's industry codes, with deadlines between min_days_left and days_ahead from now.",
-        {"keywords": {"type": "string", "description": "Optional words to match in titles"},
+                {"keywords": {"type": "string", "description": "Optional. Leave empty for broad requests: results are "
+                      "already filtered to this business's industry codes. Any listed word may match a title."},
          "days_ahead": {"type": "integer", "description": "Latest deadline, in days from now. Default 30"},
-         "min_days_left": {"type": "integer", "description": "Skip deadlines sooner than this. Default 3"},
+                  "min_days_left": {"type": "integer", "description": "Skip deadlines sooner than this. Minimum 3"},
          "place_of_performance": {"type": "string", "description": "2-letter state, e.g. TX. Unknown kept"},
          "source": {"type": "string", "enum": ["sam", "esbd"]},
          "limit": {"type": "integer", "description": "Max results, up to 25"}}),

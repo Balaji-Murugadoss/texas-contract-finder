@@ -51,3 +51,14 @@ def test_bad_tool_calls_return_errors_not_crashes(setup):
     assert "error" in tools.run_tool("save_match", {"opp_id": "sam:made-up", "fit_score": 90, "reasons": "x"}, "hvac")
     assert "error" in tools.run_tool("delete_everything", {}, "hvac")
     assert "error" in tools.run_tool("search_opportunities", {"color": "blue"}, "hvac")
+
+
+def test_model_cannot_loosen_the_lead_time_rule(setup):
+    ids = [r["opp_id"] for r in tools.search_opportunities("hvac", min_days_left=0)["results"]]
+    assert "sam:too-soon" not in ids                    # the model asked for 0 days; the floor of 3 still applies
+
+
+def test_keywords_match_any_word_and_empty_results_come_with_a_hint(setup):
+    assert [r["opp_id"] for r in tools.search_opportunities("hvac", keywords="chiller pumps")["results"]] == ["esbd:open"]
+    out = tools.search_opportunities("hvac", keywords="IT software")
+    assert out["results"] == [] and "Search again without keywords" in out["hint"]
