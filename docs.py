@@ -1,6 +1,6 @@
-"""Bid documents: download PDFs, split into chunks with page numbers, embed, then search them
-by meaning AND by exact words (hybrid search). A tiny vector store you write yourself:
-numpy + one JSON file per opportunity."""
+"""Bid documents: download PDFs, split into chunks with page numbers, embed, search by meaning.
+Hybrid search (meaning + exact words) is available but off by default: it lost on our measured test.
+A tiny vector store you write yourself: numpy + one JSON file per opportunity."""
 import io
 import json
 import math
@@ -124,15 +124,19 @@ def index_document(opp_id: str, attachments: list[str], max_files: int = 8) -> d
     return store
 
 
-def search(store: dict, question: str, k: int | None = None) -> list[dict]:
-    """Hybrid search: rank by meaning (embeddings) and by exact words, then merge the two rankings."""
+def search(store: dict, question: str, k: int | None = None, hybrid: bool = False) -> list[dict]:
+    """Meaning search by default. hybrid=True also ranks by exact words and fuses the two rankings.
+    Measured on 3 known answers: meaning-only put 3/3 in the top 5, hybrid 2/3 (it pushed the
+    deadline chunk from rank 1 to rank 11). So meaning-only is the default until a bigger test says otherwise."""
     k = k or config.TOP_K_CHUNKS
     chunks = store["chunks"]
     if not chunks:
         return []
     by_meaning = rank(np.array(store["vectors"], dtype=np.float32), embed([question])[0], k=len(chunks))
     similarity = dict(by_meaning)
-    top = fuse([i for i, _ in by_meaning], keyword_rank([c["text"] for c in chunks], question), k=k)
+    order = [i for i, _ in by_meaning]
+    if hybrid:
+        order = fuse(order, keyword_rank([c["text"] for c in chunks], question), k=len(chunks))
     return [{"file": unquote_plus(chunks[i].get("file") or ""),      # '1+-+Solicitation.pdf' -> '1 - Solicitation.pdf'
              "page": chunks[i]["page"], "similarity": round(similarity[i], 3), "text": chunks[i]["text"]}
-            for i in top]
+            for i in order[:k]]
