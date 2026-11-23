@@ -1,0 +1,23 @@
+# Two containers from one image: the API (holds the OpenAI key) and the UI (holds no secrets).
+services:
+  api:
+    build: .
+    env_file: .env                     # secrets come in at runtime, never baked into the image
+    ports: ["8000:8000"]
+    volumes:
+      - ./data:/app/data               # the databases live on your Mac, not inside the container
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 10s
+      retries: 5
+
+  ui:
+    build: .
+    command: ["streamlit", "run", "ui.py", "--server.address=0.0.0.0", "--server.port=8501"]
+    environment:
+      API_URL: http://api:8000         # containers reach each other by service name
+    ports: ["8501:8501"]
+    depends_on:
+      api:
+        condition: service_healthy     # start the UI only once the API answers /health
