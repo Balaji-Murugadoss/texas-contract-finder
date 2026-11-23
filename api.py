@@ -34,7 +34,11 @@ def _tenant_from_key(api_key: str) -> dict:
 def health():
     return {"status": "ok"}
 
-
+@app.get("/me")
+def me(x_api_key: str = Header(...)):
+    """Who this key belongs to, for the UI's profile card. Never returns the key itself."""
+    t = _tenant_from_key(x_api_key)
+    return {k: t[k] for k in ("tenant_id", "name", "naics_codes", "state", "employees", "notes")}
 @app.post("/ask")
 def ask(req: AskRequest, x_api_key: str = Header(...)):
     tenant = _tenant_from_key(x_api_key)                       # lock 1: the key decides the tenant
